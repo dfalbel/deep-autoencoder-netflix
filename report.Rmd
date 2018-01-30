@@ -1,0 +1,195 @@
+---
+title: "Deep Autoencoders for Collaborative Filtering"
+output: html_document
+---
+
+In this tutorial we will reproduce using Keras the results from [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). Kuchaiev et al. proposes a deep autoencoder model
+for the rating prediction task in recommender systems which significantly outperforms previous 
+state-of-the-art models on a time-split Netflix data set. The original code (in torch) is available [here](https://github.com/NVIDIA/DeepRecommender).
+
+Many popular matrix factorization techniques can be thought of as a form of dimensionality reduction. It is, therefore, natural to adapt deep autoencoders for this task as well.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Dataset
+
+We will use the Netflix Dataset in our experiments. This data set was released when Netflix held the
+Netflix Prize open competition for the best algorithm to predict user ratings for films. We can download the dataset from [Archive.org](https://archive.org/download/nf_prize_dataset.tar) or directly from R with: 
+
+This will take some time to downlaod since it's a 660MB file.
+
+```{r, eval = FALSE}
+download.file(
+  url = "https://archive.org/download/nf_prize_dataset.tar/nf_prize_dataset.tar.gz", 
+  destfile = "data-raw/nf_prize_dataset.tar.gz"
+  )
+```
+
+After downloading we will extract files from the compressed archive. We can do it from R with:
+
+```{r, eval = FALSE}
+untar("nf_prize_dataset.tar.gz", exdir = "data-raw")
+untar("data-raw/download/training_set.tar", exdir = "data-raw")
+```
+
+We first extracted all files from the `nf_prize_dataset.tar.gz` to the `data-raw` directory. Then, one of the files is another compressed tar that contains the training set. We again extracted it to the `data-raw` folder.
+
+This dataset comes in an unusual format. There's one file per movie, and each file is a csv with users ids, ratings and date of rating for that particular movie. The first line of the file keeps the movie_id. We will now load the data set into R, so first we will define a function to parse each file, and then loop throught all files using `purrr`.
+
+```{r}
+library(readr)
+library(purrr)
+parse_movie <- function(file) {
+  movie_id <- read_lines(file, n_max = 1) %>% 
+    parse_number()
+  df <- read_csv(
+    file, 
+    skip = 1, 
+    col_names = c("user_id", "rating", "date"), 
+    col_types = cols(
+      user_id = col_integer(),
+      rating = col_integer(),
+      date = col_date(format = "")
+    )
+    )
+  df$movie_id <- movie_id
+  df
+}
+```
+
+Now let's loop throught all files:
+
+```{r}
+files <- dir("data-raw/training_set/", full.names = TRUE)
+df <- map_df(files, parse_movie)
+head(df)
+```
+
+## Preprocessing
+
+We will now split our dataset into several training/testing intervals based on time. Training intervals will contain rating that were made earlier than the ones in testing interval. We then randomly splitted the testing interval into test and validation sets. We created 4 subsets of the data following the table above. After splitting the data we will convert it to an sparse matrix to make it easier to use in our models. We removed form the test interval users that were not found in the training set.
+
+```{r, echo = FALSE}
+knitr::kable(dplyr::data_frame(
+  `Dataset Name` = c("Full", "3 months", "6 months", "1 year"),
+  `Training Start Date` = c('1999-12-01', '2005-09-01', '2005-06-01', '2006-04-01'),
+  `Training End Date` = c("2005-11-30", "2005-11-30", "2005-11-30", "2005-05-31"),
+  `Testing Month` = c("2005-12", "2005-12", "2005-12", "2005-06")
+))
+```
+
+We will now define two functions that will help us to preprocess the data. The `split_netflix_data` function takes the full dataset and the training data interval and will split the dataset into the parts we described above. It will also show us some stats about the dataset.
+
+```{r}
+split_netflix_data <- function(df, min_date, max_date) {
+  
+  x <- df %>%
+    filter(between(date, min_date, max_date))
+  
+  y <- df %>%
+    filter(
+      between(date, max_date + days(1), max_date + months(1) - days(1)),
+      user_id %in% unique(x$user_id), 
+      movie_id %in% unique(x$movie_id)
+    )
+  
+  # split test and validation randomly
+  ind_validation <- sample.int(nrow(y), nrow(y)/2)
+  
+  y_test <- y[-ind_validation,]
+  y_val <- y[ind_validation,]
+  
+  cat("Dataset Info \n")
+  cat("min_date = ", as.character(min_date), " max_date = ", as.character(max_date), "\n")
+  cat("Train -> #Users ", length(unique(x$uid)), " #Ratings ", nrow(x), "\n")
+  cat("Test  -> #Users ", length(unique(y_test$uid)), " #Ratings ", nrow(y_test), "\n")
+  cat("Valid -> #Users ", length(unique(y_val$uid)), " #Ratings ", nrow(y_val), "\n")
+  
+  list(x = x, y_val = y_val, y_test = y_test)
+} 
+```
+
+The `to_sparse` function will convert the datasets to sparse matrixes. It will take care of movie_ids and user_ids so rows and columns are compatible between the training, testing and validation sets. It will return a nested list containing all datasets. We will be able to acess training data with `netflix_data$train$x` for example.
+
+```{r}
+to_sparse <- function(netflix_data) {
+  
+  x <- netflix_data$x
+  y_val <- netflix_data$y_val
+  y_test <- netflix_data$y_test
+  
+  
+  uids <- data_frame(
+    uid = unique(x$uid),
+    user_id = row_number(uid)
+  )
+  
+  mids <- data_frame(
+    mid = unique(x$mid),
+    movie_id = row_number(mid)
+  )
+  
+  x <- x %>%
+    left_join(uids, by = "uid") %>%
+    left_join(mids, by = "mid")
+  
+  y_val <- y_val %>%
+    left_join(uids, by = "uid") %>%
+    left_join(mids, by = "mid")
+  
+  y_test <- y_test %>%
+    left_join(uids, by = "uid") %>%
+    left_join(mids, by = "mid")
+  
+  x <- sparseMatrix(x$user_id, x$movie_id, x = x$rating)
+  
+  # validation data
+  y_val <- sparseMatrix(y_val$user_id, y_val$movie_id, x = y_val$rating)
+  ind_ratings <- which(rowSums(y_val) > 0)
+  
+  y_val <- y_val[ind_ratings,]
+  x_val <- x[ind_ratings,]
+  
+  # test data
+  y_test <- sparseMatrix(y_test$user_id, y_test$movie_id, x = y_test$rating)
+  ind_ratings <- which(rowSums(y_test) > 0)
+  
+  y_test <- y_test[ind_ratings,]
+  x_test <- x[ind_ratings,]
+  
+  list(
+    train = list(x = x, y = x),
+    val = list(x = x_val, y = y_val),
+    test = list(x = x_test, y = y_test)
+  )
+}
+```
+
+Now let's create the 4 datasets and save them to the disk.
+
+```{r}
+netflix_full <- split_netflix_data(df, ymd("1999-12-01"), ymd("2005-11-30"))
+netflix_full <- to_sparse(netflix_full)
+saveRDS(netflix_full, "data/netflix_full.rds")
+
+netflix_3m <- split_netflix_data(df, ymd("2005-09-01"), ymd("2005-11-30"))
+netflix_3m <- to_sparse(netflix_3m)
+saveRDS(netflix_3m, "data/netflix_3m.rds")
+
+netflix_6m <- split_netflix_data(df, ymd("2005-06-01"), ymd("2005-11-30"))
+netflix_6m <- to_sparse(netflix_6m)
+saveRDS(netflix_6m, "data/netflix_6m.rds")
+
+netflix_1y <- split_netflix_data(df, ymd("2006-04-01"), ymd("2005-05-31"))
+netflix_1y <- to_sparse(netflix_1y)
+saveRDS(netflix_6m, "data/netflix_1y.rds")
+```
+
+We now have our data prepared to run our experiments.
+
+
+
+
+
