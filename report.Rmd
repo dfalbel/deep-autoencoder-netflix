@@ -3,24 +3,29 @@ title: "Deep Autoencoders for Collaborative Filtering"
 output: html_document
 ---
 
-In this tutorial we will reproduce using Keras the results from [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). Kuchaiev et al. proposes a deep autoencoder model
-for the rating prediction task in recommender systems which significantly outperforms previous 
-state-of-the-art models on a time-split Netflix data set. The original code (in torch) is available [here](https://github.com/NVIDIA/DeepRecommender).
-
-Many popular matrix factorization techniques can be thought of as a form of dimensionality reduction. It is, therefore, natural to adapt deep autoencoders for this task as well.
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+In this tutorial we will reproduce using Keras the results from [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). Kuchaiev et al. proposes a deep autoencoder model
+for the rating prediction task in recommender systems which significantly outperforms previous 
+state-of-the-art models on a time-split Netflix data set. The original code (in pytorch) is available [here](https://github.com/NVIDIA/DeepRecommender).
+
+Many popular matrix factorization techniques can be thought of as a form of dimensionality reduction. It is, therefore, natural to adapt deep autoencoders for this task as well.
+
+In this tutorial we will demonstrate some advanced features of Keras such as creating custom layers, loss functions and metrics. We will also use the [tfdatasets](https://github.com/rstudio/tfdatasets) package to make data input faster.
+
 ## Dataset
 
 We will use the Netflix Dataset in our experiments. This data set was released when Netflix held the
-Netflix Prize open competition for the best algorithm to predict user ratings for films. We can download the dataset from [Archive.org](https://archive.org/download/nf_prize_dataset.tar) or directly from R with: 
+Netflix Prize open competition for the best algorithm to predict user ratings for films. This is a long session of data manipulation, if you want to focus on the Keras model you can download the processed data from [here]() and go directly to the [model definition session]().
 
-This will take some time to downlaod since it's a 660MB file.
+### Downloading and reading
+
+We can download the dataset from [Archive.org](https://archive.org/download/nf_prize_dataset.tar) or directly from R with the code below.
 
 ```{r, eval = FALSE}
+# This will take some time to downlaod since it's a 660MB file.
 download.file(
   url = "https://archive.org/download/nf_prize_dataset.tar/nf_prize_dataset.tar.gz", 
   destfile = "data-raw/nf_prize_dataset.tar.gz"
@@ -67,18 +72,17 @@ df <- map_df(files, parse_movie)
 head(df)
 ```
 
-## Preprocessing
+### Preprocessing
 
-We will now split our dataset into several training/testing intervals based on time. Training intervals will contain rating that were made earlier than the ones in testing interval. We then randomly splitted the testing interval into test and validation sets. We created 4 subsets of the data following the table above. After splitting the data we will convert it to an sparse matrix to make it easier to use in our models. We removed form the test interval users that were not found in the training set.
+We will now split our dataset into training/testing intervals based on time. Training intervals will contain rating that were made earlier than the ones in testing interval. We then randomly splitted the testing interval into test and validation sets. We created 4 subsets of the data following the table above. After splitting the data we will convert it to an sparse matrix to make it easier to use in our models. We will also remove from the test interval users that were not found in the training set.
 
-```{r, echo = FALSE}
-knitr::kable(dplyr::data_frame(
-  `Dataset Name` = c("Full", "3 months", "6 months", "1 year"),
-  `Training Start Date` = c('1999-12-01', '2005-09-01', '2005-06-01', '2006-04-01'),
-  `Training End Date` = c("2005-11-30", "2005-11-30", "2005-11-30", "2005-05-31"),
-  `Testing Month` = c("2005-12", "2005-12", "2005-12", "2005-06")
-))
-```
+The time splits that were used can be seen in the table below:
+
+|Dataset Name |Training Start Date |Training End Date |Testing Month |
+|:------------|:-------------------|:-----------------|:-------------|
+|3 months     |2005-09-01          |2005-11-30        |2005-12       |
+
+The paper defines other dataset names with diferent time intervals.
 
 We will now define two functions that will help us to preprocess the data. The `split_netflix_data` function takes the full dataset and the training data interval and will split the dataset into the parts we described above. It will also show us some stats about the dataset.
 
@@ -143,17 +147,17 @@ to_sparse <- function(netflix_data) {
     left_join(uids, by = "uid") %>%
     left_join(mids, by = "mid")
   
-  x <- sparseMatrix(x$user_id, x$movie_id, x = x$rating)
+  x <- as(sparseMatrix(x$user_id, x$movie_id, x = x$rating), "dgTMatrix")
   
   # validation data
-  y_val <- sparseMatrix(y_val$user_id, y_val$movie_id, x = y_val$rating)
+  y_val <- as(sparseMatrix(y_val$user_id, y_val$movie_id, x = y_val$rating), "dgTMatrix")
   ind_ratings <- which(rowSums(y_val) > 0)
   
   y_val <- y_val[ind_ratings,]
   x_val <- x[ind_ratings,]
   
   # test data
-  y_test <- sparseMatrix(y_test$user_id, y_test$movie_id, x = y_test$rating)
+  y_test <- as(sparseMatrix(y_test$user_id, y_test$movie_id, x = y_test$rating), "dgTMatrix")
   ind_ratings <- which(rowSums(y_test) > 0)
   
   y_test <- y_test[ind_ratings,]
@@ -167,24 +171,12 @@ to_sparse <- function(netflix_data) {
 }
 ```
 
-Now let's create the 4 datasets and save them to the disk.
+Now let's create our dataset and save it to the disk.
 
 ```{r}
-netflix_full <- split_netflix_data(df, ymd("1999-12-01"), ymd("2005-11-30"))
-netflix_full <- to_sparse(netflix_full)
-saveRDS(netflix_full, "data/netflix_full.rds")
-
 netflix_3m <- split_netflix_data(df, ymd("2005-09-01"), ymd("2005-11-30"))
 netflix_3m <- to_sparse(netflix_3m)
 saveRDS(netflix_3m, "data/netflix_3m.rds")
-
-netflix_6m <- split_netflix_data(df, ymd("2005-06-01"), ymd("2005-11-30"))
-netflix_6m <- to_sparse(netflix_6m)
-saveRDS(netflix_6m, "data/netflix_6m.rds")
-
-netflix_1y <- split_netflix_data(df, ymd("2006-04-01"), ymd("2005-05-31"))
-netflix_1y <- to_sparse(netflix_1y)
-saveRDS(netflix_6m, "data/netflix_1y.rds")
 ```
 
 We now have our data prepared to run our experiments.
