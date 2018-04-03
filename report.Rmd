@@ -44,8 +44,7 @@ We first extracted all files from the `nf_prize_dataset.tar.gz` to the `data-raw
 This dataset comes in an unusual format. There's one file per movie, and each file is a csv with users ids, ratings and date of rating for that particular movie. The first line of the file keeps the movie_id. We will now load the data set into R, so first we will define a function to parse each file, and then loop throught all files using `purrr`.
 
 ```{r}
-library(readr)
-library(purrr)
+library(tidyverse)
 parse_movie <- function(file) {
   movie_id <- read_lines(file, n_max = 1) %>% 
     parse_number()
@@ -74,7 +73,7 @@ head(df)
 
 ### Preprocessing
 
-We will now split our dataset into training/testing intervals based on time. Training intervals will contain rating that were made earlier than the ones in testing interval. We then randomly splitted the testing interval into test and validation sets. We created 4 subsets of the data following the table above. After splitting the data we will convert it to an sparse matrix to make it easier to use in our models. We will also remove from the test interval users that were not found in the training set.
+We will now split our dataset into training/testing intervals based on time. Training intervals will contain rating that were made earlier than the ones in testing interval. We then randomly splitted the testing interval into test and validation sets. After splitting the data we will convert it to an sparse matrix to make it easier to use in our models. We will also remove from the test interval users that were not found in the training set.
 
 The time splits that were used can be seen in the table below:
 
@@ -84,7 +83,7 @@ The time splits that were used can be seen in the table below:
 
 The paper defines other dataset names with diferent time intervals.
 
-We will now define two functions that will help us to preprocess the data. The `split_netflix_data` function takes the full dataset and the training data interval and will split the dataset into the parts we described above. It will also show us some stats about the dataset.
+We will now define two functions that will help us preprocess the data. The `split_netflix_data` function takes the full dataset and the training data interval and will split the dataset into the parts we described above. It will also show us some stats about the dataset like the number of unique users.
 
 ```{r}
 split_netflix_data <- function(df, min_date, max_date) {
@@ -180,6 +179,18 @@ saveRDS(netflix_3m, "data/netflix_3m.rds")
 ```
 
 We now have our data prepared to run our experiments.
+
+## Model
+
+We will train the same model descried in the paper [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). An Autoencoder is a neural network that learns two transformations: the encoder - $encode(x): \!R^n \Rightarrow \!R^d$ and $decoder(z): \!R^d \Rightarrow \!R^n$. The idea is to obtain a $d$-dimensional representation of data such that a loss function between $x$ and $f(x) = decoder(encoder(x))$ is minimized. In Kuchaiev et al  encoder and decoder are fully connected layers computing $l=f(W*x + b)$ where $f$ is an activation function. They found that using activation functions containing non-zero negative parts to very very important to the model performance. Also, Kuchaiev et al uses constrained autoencoders, i.e. encoder and decoder layers are mirrored and shares weights.
+
+The DeepRec model is trained using the Masked Mean Squared Error. This almost equivalent to the Mean Squared Error except that it doesn't consider the error for items we don't know the user rating.
+
+
+
+
+
+
 
 
 
