@@ -4,7 +4,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
 ```
 
 In this tutorial we will reproduce using Keras the results from [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). Kuchaiev et al. proposes a deep autoencoder model
@@ -182,12 +182,73 @@ We now have our data prepared to run our experiments.
 
 ## Model
 
-We will train the same model descried in the paper [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). An Autoencoder is a neural network that learns two transformations: the encoder - $encode(x): \!R^n \Rightarrow \!R^d$ and $decoder(z): \!R^d \Rightarrow \!R^n$. The idea is to obtain a $d$-dimensional representation of data such that a loss function between $x$ and $f(x) = decoder(encoder(x))$ is minimized. In Kuchaiev et al  encoder and decoder are fully connected layers computing $l=f(W*x + b)$ where $f$ is an activation function. They found that using activation functions containing non-zero negative parts to very very important to the model performance. Also, Kuchaiev et al uses constrained autoencoders, i.e. encoder and decoder layers are mirrored and shares weights.
+We will train the same model descried in the paper [*Training Deep AutoEncoders for Collaborative Filtering*](https://arxiv.org/abs/1708.01715). An Autoencoder is a neural network that learns two transformations: the $encoder(x): \!R^n \Rightarrow \!R^d$ and $decoder(z): \!R^d \Rightarrow \!R^n$. The idea is to obtain a $d$-dimensional representation of data such that a loss function between $x$ and $f(x) = decoder(encoder(x))$ is minimized. In Kuchaiev et al  encoder and decoder are fully connected layers computing $l=f(W*x + b)$ where $f$ is an activation function. They found that using activation functions containing non-zero negative parts to very very important to the model performance. Also, Kuchaiev et al uses constrained autoencoders, i.e. encoder and decoder layers are mirrored and shares weights.
 
-The DeepRec model is trained using the Masked Mean Squared Error. This almost equivalent to the Mean Squared Error except that it doesn't consider the error for items we don't know the user rating.
+The model is trained using the Masked Mean Squared Error. This is almost equivalent to the Mean Squared Error except that it doesn't consider the error for items we don't know the user rating. The loss function is defined as:
 
+$$MMSE = \frac{m_i*(r_i - y_i)^2}{\sum_{i=0}^{i=n}m_i}$$
+where $r_i$ is the actual rating, $y_i$ is the predicted rating and $m_i$ is a mask function such that $m_i= 1$ if $r_i \ne 0$ else $m_i = 0$. We used Stochastic Gradient Descent with momentum for optimization. The paper proposes a technique called Dense Re-Feeding which we won't implement in this tutorial.
 
+The figure below represents an autoencoder with two layers.
 
+![](autoencoder.png)
+
+## Implementation
+
+Let's now define our model in Keras. Implementing this model requires using some advanced features of Keras like ccreating custom layers and loss functions that we will in explain in detail.
+
+Since we want a tied autoencoder, ie. we want the encoder weights to be shared with the corresponding decoder weights. In the figure above this can e translated to $W^1_d = (W^1_e)^\intercal$ and $W^2_d = (W^2_e)^\intercal$. In Keras, we can define a custom layer that will receive a dense layer as an argument and return a new one with the weights transposed. Below we defined a new layer called `TiedDenseLayer` that will do this.
+
+```{r}
+TiedDenseLayer <- R6::R6Class(
+  "TiedDenseLayer",
+  inherit = KerasLayer,
+  public = list(
+    
+    master_layer = NULL,
+    W = NULL,
+    b = NULL,
+    output_dim = NULL,
+    
+    initialize = function(output_dim, master_layer) {
+      self$master_layer <- master_layer
+    },
+    
+    build = function(input_shape) {
+      # the weights W are just the transposed weights W of the master layer
+      self$W <- k_transpose(self$master_layer$weights[[1]])
+      self$output_dim <- self$W$shape$as_list()[[2]]
+      
+      # we create a new bias weigths
+      self$b <- self$add_weight(
+        name = 'bias',
+        shape = list(self$output_dim),
+        initializer = initializer_constant(0),
+        trainable = TRUE
+      )
+      
+    },
+    
+    call = function(x, mask = NULL) {
+      k_dot(x, self$W) + self$b # the same as dense layer
+    },
+    
+    compute_output_shape = function(input_shape) {
+      list(input_shape[[1]], self$output_dim)
+    }
+    
+  )
+)
+
+# wraper to use the layer in R
+layer_tied_dense <- function(object, master_layer, name = NULL, trainable = TRUE) {
+  create_layer(TiedDenseLayer, object, list(
+    master_layer = master_layer,
+    name = name,
+    trainable = trainable
+  ))
+}
+```
 
 
 
