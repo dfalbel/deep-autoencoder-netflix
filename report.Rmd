@@ -11,7 +11,9 @@ In this tutorial we will reproduce using Keras the results from [*Training Deep 
 for the rating prediction task in recommender systems which significantly outperforms previous 
 state-of-the-art models on a time-split Netflix data set. The original code (in pytorch) is available [here](https://github.com/NVIDIA/DeepRecommender).
 
-Many popular matrix factorization techniques can be thought of as a form of dimensionality reduction. It is, therefore, natural to adapt deep autoencoders for this task as well.
+Many popular matrix factorization techniques can be thought of as a form of dimensionality reduction. It is, therefore, natural to adapt deep autoencoders for this task as well. There are many other approaches to the recommendation problem using Deep Learning. In particular there is [U-AutoRec](http://users.cecs.anu.edu.au/~u5098633/papers/www15.pdf) that uses Autoencoders for collaborative filtering. 
+
+There are also many non deep learning approaches to this problem many of them implemented in [rsparse package](https://github.com/dselivanov/rsparse).
 
 In this tutorial we will demonstrate some advanced features of Keras such as creating custom layers, loss functions and metrics. We will also use the [tfdatasets](https://github.com/rstudio/tfdatasets) package to make data input faster.
 
@@ -199,24 +201,31 @@ Let's now define our model in Keras. Implementing this model requires using some
 
 Since we want a tied autoencoder, ie. we want the encoder weights to be shared with the corresponding decoder weights. In the figure above this can e translated to $W^1_d = (W^1_e)^\intercal$ and $W^2_d = (W^2_e)^\intercal$. In Keras, we can define a custom layer that will receive a dense layer as an argument and return a new one with the weights transposed. Below we defined a new layer called `TiedDenseLayer` that will do this.
 
+A custom layer in Keras is an `R6` class that inherits the `KerasLayer` class. You can learn more [here](https://keras.rstudio.com/articles/custom_layers.html) but in short we implemented four methods.
+
+- `initialize(output_dim, master_layer)`: At initilization we specify wich will be the primary layer that we want to share weights with.
+- `build(input_shape)`: This is where we defined our weights. We specified the `W` term to be the transpose `W` from the primary layer. We also created a bias term using the function `add_weights` (this is import so Keras can count the parameters on the model).
+- `call(x)`: This is where the layer’s logic lives.
+- `compute_output_shape(input_shape)`: We return a list with the output shape. 
+
 ```{r}
 TiedDenseLayer <- R6::R6Class(
   "TiedDenseLayer",
   inherit = KerasLayer,
   public = list(
     
-    master_layer = NULL,
+    primary_layer = NULL,
     W = NULL,
     b = NULL,
     output_dim = NULL,
     
-    initialize = function(output_dim, master_layer) {
-      self$master_layer <- master_layer
+    initialize = function(output_dim, primary_layer) {
+      self$primary_layer <- primary_layer
     },
     
     build = function(input_shape) {
       # the weights W are just the transposed weights W of the master layer
-      self$W <- k_transpose(self$master_layer$weights[[1]])
+      self$W <- k_transpose(self$primary_layer$weights[[1]])
       self$output_dim <- self$W$shape$as_list()[[2]]
       
       # we create a new bias weigths
@@ -241,9 +250,9 @@ TiedDenseLayer <- R6::R6Class(
 )
 
 # wraper to use the layer in R
-layer_tied_dense <- function(object, master_layer, name = NULL, trainable = TRUE) {
+layer_tied_dense <- function(object, primary_layer, name = NULL, trainable = TRUE) {
   create_layer(TiedDenseLayer, object, list(
-    master_layer = master_layer,
+    primary_layer = primary_layer,
     name = name,
     trainable = trainable
   ))
