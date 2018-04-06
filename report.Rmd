@@ -31,7 +31,7 @@ We can download the dataset from [Archive.org](https://archive.org/download/nf_p
 download.file(
   url = "https://archive.org/download/nf_prize_dataset.tar/nf_prize_dataset.tar.gz", 
   destfile = "data-raw/nf_prize_dataset.tar.gz"
-  )
+)
 ```
 
 After downloading we will extract files from the compressed archive. We can do it from R with:
@@ -59,7 +59,7 @@ parse_movie <- function(file) {
       rating = col_integer(),
       date = col_date(format = "")
     )
-    )
+  )
   df$movie_id <- movie_id
   df
 }
@@ -258,6 +258,162 @@ layer_tied_dense <- function(object, primary_layer, name = NULL, trainable = TRU
   ))
 }
 ```
+
+Now we are ready to define the model in keras. In this example we need to use the functional API.
+We will train a 6 layer autoencoder (3 layer encoder and 3 for the decoder) like in the figure 1.
+Let's first define our input layer, it will be a matrix with the number of columns equal to the number of unique movies in the Netflix dataset.
+
+```{r}
+input <- layer_input(shape = ncol(netflix3m$train$x))
+```
+
+Now we will define the fully connected layers of the encoder model. Later, we will specify the relationship between them, for now let's just initialize them. We will have 3 layers, the first with 128 hidden units and the other two will have 256.
+
+```{r}
+dense_1 <- layer_dense(units = 128)
+dense_2 <- layer_dense(units = 256)
+dense_3 <- layer_dense(units = 256)
+```
+
+Since we want that the decoder's $W$ weigths to be shared with the encoder layers, we will use our custom `layer_tied_dense` to specify the layers from the decoder.
+
+```{r}
+dense_1_transposed <- layer_tied_dense(master_layer = dense_1)
+dense_2_transposed <- layer_tied_dense(master_layer = dense_2)
+dense_3_transposed <- layer_tied_dense(master_layer = dense_3)
+```
+
+Now that we have initialized all layers, we need to define the relationship between them.
+We can use the usual Keras syntax for this. Note that after each layer we use a *SELU* activation - the authors of the paper concluded that activations that have non-zero negative values performs better for this task. After the encoder layers we also used a Dropout layer to reduce overfitting.
+
+```{r}
+output <- input %>%
+  # encoder
+  dense_1() %>%
+  layer_activation("selu") %>%
+  dense_2() %>%
+  layer_activation("selu") %>%
+  dense_3() %>%
+  layer_activation("selu") %>%
+  # dropout
+  layer_dropout(0.65) %>%
+  # decoder
+  dense_3_transposed() %>%
+  layer_activation("selu") %>%
+  dense_2_transposed() %>%
+  layer_activation("selu") %>%
+  dense_1_transposed() %>%
+  layer_activation("selu")
+```
+
+We can then define the model in Keras with:
+
+```{r}
+model <- keras_model(input, output)
+```
+
+Before fitting our model, we need to compile it. It's also at compiling that that we define the loss function and metrics of model performance. The Deep Autoencoder was trained with the MMSE (Masked Mean Squared Error) loss defined above and it's performance is measure by the RMMSE that is just the square root of the MMSE. 
+
+In order to use custom loss functions in Keras, we need to implement it using Keras backend operations. Below we implemented the MMSE and RMMSE in Keras.
+
+```{r}
+mmse <- function(y_true, y_pred) {
+  mask_true <- k_cast(k_not_equal(y_true, 0), k_floatx())
+  masked_squared_error <- k_square(mask_true * (y_true - y_pred))
+  masked_mse <- k_sum(masked_squared_error)/k_sum(mask_true)
+  masked_mse
+}
+
+rmmse <- function(y_true, y_pred) {
+  mmse(y_true, y_pred) ^ 0.5
+}
+```
+
+Now we can compile our model. We will used Stochastic Gradient Descent with momentum for optimization. Learning rate and Momentum values were taken from the paper.
+
+```{r}
+model %>%
+  compile(
+    loss = mmse, 
+    metrics = list(rmmse = rmmse), 
+    optimizer = optimizer_sgd(lr = 0.001, momentum = 0.9)
+  )
+```
+
+If our data was loaded into an usual R matrix we would be able to start fitting our model, but it's loaded into an R sparse matrix (provided by the `Matrix`) and Keras doesn't handle them by default. Since we have a huge matrix (millions of rows and thousands of columns) we also can't convert it to a regular R matrix - that would take too much RAM. Istead, we will create a **generator** function that will convert the the sparse matrix to dense matrix batch by batch as the model fitting steps requires it.
+
+We could do this in pure R, but it would be a bottleneck because the sparse matrix convertion is slow compared to an iteration of the stochastic gradient descent algorithm. In order to have speed we will use the `tfdatasets` package that makes all the transformations within the tensorflow graph.
+
+The following function defines a generator using `tfdatasets` API. 
+
+```{r}
+library(tfdatasets)
+sparse_generator <- function(set, batch_size) {
+  
+  # Convert R sparse matrix to TensorFlow sparse matrix representation.
+  x <- tf$SparseTensorValue(
+    cbind(set$x@i, set$x@j),
+    set$x@x,
+    dense_shape = dim(set$x)
+  ) %>%
+    tf$sparse_reorder()
+  
+  y <- tf$SparseTensorValue(
+    cbind(set$y@i, set$y@j),
+    set$y@x,
+    dense_shape = dim(set$y)
+  ) %>%
+    tf$sparse_reorder()
+  
+  # Create datasets and convert from sparse to dense representation
+  x <- tensor_slices_dataset(x) %>%
+    dataset_map(tf$sparse_tensor_to_dense)
+  y <- tensor_slices_dataset(y) %>%
+    dataset_map(tf$sparse_tensor_to_dense)
+  
+  # Zip datasets together, shuffles and get batches
+  zip_datasets(x, y) %>%
+    dataset_repeat() %>%
+    dataset_shuffle(100) %>%
+    dataset_batch(batch_size)
+}
+```
+
+Finally we can fit our model by calling the `fit_generator` function.
+
+```{r}
+model %>%
+  fit_generator(
+    sparse_generator(netflix3m$train, 128),
+    epochs = 100,
+    steps_per_epoch = nrow(netflix3m$train$x)/128
+  )
+```
+
+Fitting takes ~1h in laptop and after this we can evaluate our model in the test set by using the `evaluate_generator` function.
+
+```{r}
+model %>%
+  evaluate_generator(
+    sparse_generator(netflix3m$test, batch_size = 128), 
+    steps = nrow(netflix3m$test)/128
+  )
+```
+
+The RMMSE in the test set was 0.96632 versus 0.9328 reported by the paper. We believe that the *dense refeeding* startegy that we didn't implement is reponsible for this difference, but our results still outperforms other known deep learning approaches to the problem like U-AutoRec that achieves 0.9892 RMMSE.
+
+## Wraping Up
+
+* We implemented a the Deep Autoencoder for Collaborative Filtering, reproducing results from Kuchaiev et al. 
+* We learned about custom layers, loss functions and metric in Keras.
+* We used the `tfdatasets` for high speed data transformations.
+
+We could also have implemented this model with TensorFlow Estimators that would allow us to use special TensorFlow operations for sparse matrixes like `tf$sparse_matmul` avoiding the explicit conversion - this is expected to be faster.
+
+
+
+
+
 
 
 

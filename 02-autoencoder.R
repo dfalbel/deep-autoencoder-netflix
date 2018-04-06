@@ -80,8 +80,6 @@ sparse_generator <- function(set, batch_size) {
   ) %>%
     tf$sparse_reorder()
 
-  set$y <- as(set$y, "dgTMatrix")
-
   y <- tf$SparseTensorValue(
     cbind(set$y@i, set$y@j),
     set$y@x,
